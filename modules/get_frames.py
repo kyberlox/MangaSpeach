@@ -15,72 +15,115 @@ class FrameExtractor:
             'failed_images': 0,
             'total_objects': 0,
             'small_objects_skipped': 0,
+            'text_objects_found': 0,
+            'image_objects_found': 0,
             'start_time': None,
             'end_time': None
         }
-        
-    def debug_print(self, message):
-        """Простой вывод для отладки"""
-        print(f"[DEBUG] {datetime.now().strftime('%H:%M:%S')} - {message}")
-        
-    def check_directory_structure(self):
-        """Проверка структуры директорий"""
-        self.debug_print("Проверка структуры директорий...")
-        
-        current_dir = Path(".").absolute()
-        self.debug_print(f"Текущая директория: {current_dir}")
-        
-        # ПРОВЕРЯЕМ ПРАВИЛЬНЫЙ ПУТЬ - ./static/ а не ./static/frames/
-        static_path = Path("./static/")
-        self.debug_print(f"Путь к static: {static_path.absolute()}")
-        self.debug_print(f"Static существует: {static_path.exists()}")
-        
-        if static_path.exists():
-            items = list(static_path.iterdir())
-            self.debug_print(f"Содержимое static: {[item.name for item in items]}")
+    
+    def detect_text_regions(self, img):
+        """Обнаружение текстовых регионов"""
+        try:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            denoised = cv2.medianBlur(gray, 3)
             
-            chapters = [item for item in items if item.is_dir() and item.name.startswith('chapter_')]
-            self.debug_print(f"Найдено папок глав: {len(chapters)}")
+            _, text_mask1 = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+            _, text_mask2 = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             
-            for chapter in sorted(chapters):
-                images = list(chapter.glob("*.png")) + list(chapter.glob("*.jpg")) + list(chapter.glob("*.jpeg"))
-                self.debug_print(f"  {chapter.name}: {len(images)} изображений")
+            text_mask = cv2.bitwise_or(text_mask1, text_mask2)
+            
+            kernel_horizontal = np.ones((1, 15), np.uint8)
+            kernel_vertical = np.ones((5, 1), np.uint8)
+            
+            text_mask = cv2.morphologyEx(text_mask, cv2.MORPH_CLOSE, kernel_horizontal)
+            text_mask = cv2.morphologyEx(text_mask, cv2.MORPH_CLOSE, kernel_vertical)
+            
+            return text_mask
+        except Exception:
+            return None
+    
+    def detect_image_objects(self, img):
+        """Обнаружение графических объектов"""
+        try:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            
+            binary_adaptive = cv2.adaptiveThreshold(
+                gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2
+            )
+            
+            _, binary_otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+            
+            combined_binary = cv2.bitwise_or(binary_adaptive, binary_otsu)
+            
+            kernel = np.ones((3, 3), np.uint8)
+            combined_binary = cv2.morphologyEx(combined_binary, cv2.MORPH_OPEN, kernel)
+            combined_binary = cv2.morphologyEx(combined_binary, cv2.MORPH_CLOSE, kernel)
+            
+            return combined_binary
+        except Exception:
+            return None
+    
+    def process_contours(self, contours, img, frames_dir, object_type="image"):
+        """Обработка контуров и сохранение объектов"""
+        objects_found = 0
+        small_objects = 0
+        
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            
+            min_area = 50 if object_type == "text" else 100
+            
+            if area < min_area:
+                small_objects += 1
+                continue
+            
+            x, y, w, h = cv2.boundingRect(contour)
+            
+            padding = 10 if object_type == "text" else 5
+            x = max(0, x - padding)
+            y = max(0, y - padding)
+            w = min(img.shape[1] - x, w + 2 * padding)
+            h = min(img.shape[0] - y, h + 2 * padding)
+            
+            aspect_ratio = w / h
+            if aspect_ratio > 10 or aspect_ratio < 0.1:
+                continue
+            
+            object_img = img[y:y+h, x:x+w]
+            
+            frame_filename = frames_dir / f"frame_{self.stats['total_objects']:06d}.png"
+            success = cv2.imwrite(str(frame_filename), object_img)
+            
+            if success:
+                self.stats['total_objects'] += 1
+                objects_found += 1
                 
-        return static_path.exists()
+                if object_type == "text":
+                    self.stats['text_objects_found'] += 1
+                else:
+                    self.stats['image_objects_found'] += 1
+        
+        return objects_found, small_objects
     
     def process_images(self):
         """Основной процесс обработки"""
-        self.debug_print("Запуск process_images")
-        
-        # Проверяем структуру директорий
-        if not self.check_directory_structure():
-            self.debug_print("❌ ОШИБКА: Неправильная структура директорий!")
-            return
-        
         self.stats['start_time'] = datetime.now()
         
-        print("🚀 ЗАПУСК ПРОГРАММЫ ИЗВЛЕЧЕНИЯ КАДРОВ")
-        print(f"⏰ Время начала: {self.stats['start_time'].strftime('%Y-%m-%d %H:%M:%S')}")
-        print()
+        print("🚀 Запуск программы")
+        print(f"⏰ Время начала: {self.stats['start_time'].strftime('%H:%M:%S')}")
         
-        # Создаем папку для фреймов (это куда сохраняем результат)
+        # Создаем папку для фреймов
         frames_dir = Path('./static/frames')
         frames_dir.mkdir(parents=True, exist_ok=True)
-        self.debug_print(f"Создана папка для фреймов: {frames_dir.absolute()}")
         
-        # Ищем все папки глав в ПРАВИЛЬНОМ МЕСТЕ - ./static/
+        # Ищем все папки глав
         chapters = sorted([p for p in Path('./static/').iterdir() 
                           if p.is_dir() and p.name.startswith('chapter_')])
         
         self.stats['total_chapters'] = len(chapters)
-        self.debug_print(f"Найдено глав для обработки: {self.stats['total_chapters']}")
         
         if self.stats['total_chapters'] == 0:
-            print("❌ ОШИБКА: Папки глав не найдены!")
-            print("Убедитесь, что:")
-            print("  - Папки называются chapter_001, chapter_002, ...")
-            print("  - Папки расположены в ./static/")  # ИСПРАВЛЕНО
-            print("  - Программа запущена из правильной директории")
+            print("❌ Ошибка: Папки глав не найдены")
             return
         
         # Подсчет общего количества изображений
@@ -92,119 +135,75 @@ class FrameExtractor:
             total_images += len(images)
         
         self.stats['total_images'] = total_images
-        print(f"📁 Обнаружено глав: {self.stats['total_chapters']}")
-        print(f"🖼️  Всего изображений для обработки: {total_images}")
+        
+        print(f"📁 Глав: {self.stats['total_chapters']}")
+        print(f"🖼️ Изображений: {total_images}")
         print()
         
         if total_images == 0:
-            print("❌ ОШИБКА: Изображения не найдены!")
-            print("Убедитесь, что в папках глав есть файлы .png, .jpg или .jpeg")
+            print("❌ Ошибка: Изображения не найдены")
             return
         
         # Обработка глав
         for chapter_idx, chapter_path in enumerate(chapters, 1):
-            print(f"📖 Обрабатывается глава {chapter_path.name} ({chapter_idx}/{self.stats['total_chapters']})")
+            print(f"📖 {chapter_path.name} ({chapter_idx}/{self.stats['total_chapters']})")
             
             images = []
             for ext in ['*.png', '*.jpg', '*.jpeg']:
                 images.extend(sorted(chapter_path.glob(ext)))
             
             chapter_objects = 0
+            chapter_text_objects = 0
+            chapter_image_objects = 0
+            chapter_small_objects = 0
             
             for image_idx, image_path in enumerate(images, 1):
-                print(f"  🖼️  Обработка {image_idx}/{len(images)}: {image_path.name}")
-                
                 try:
-                    # Загружаем изображение
                     img = cv2.imread(str(image_path))
                     if img is None:
-                        print(f"    ❌ Не удалось загрузить изображение")
                         self.stats['failed_images'] += 1
                         continue
                     
-                    self.debug_print(f"Изображение загружено: {img.shape}")
+                    # Обнаружение текста
+                    text_mask = self.detect_text_regions(img)
+                    text_objects_found = 0
+                    text_small_objects = 0
                     
-                    # Создаем копию и преобразуем в grayscale
-                    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                    if text_mask is not None:
+                        text_contours, _ = cv2.findContours(text_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                        text_objects, text_small = self.process_contours(text_contours, img, frames_dir, "text")
+                        text_objects_found = text_objects
+                        text_small_objects = text_small
                     
-                    # Определяем тип фона по среднему значению яркости
-                    mean_val = np.mean(gray)
-                    is_light_bg = mean_val > 127
+                    # Обнаружение изображений
+                    image_mask = self.detect_image_objects(img)
+                    image_objects_found = 0
+                    image_small_objects = 0
                     
-                    print(f"    📊 Размер: {img.shape[1]}x{img.shape[0]}px, фон: {'светлый' if is_light_bg else 'темный'} (яркость: {mean_val:.1f})")
+                    if image_mask is not None:
+                        image_contours, _ = cv2.findContours(image_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                        image_objects, image_small = self.process_contours(image_contours, img, frames_dir, "image")
+                        image_objects_found = image_objects
+                        image_small_objects = image_small
                     
-                    # Бинаризация в зависимости от типа фона
-                    if is_light_bg:
-                        _, thresh = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
-                    else:
-                        _, thresh = cv2.threshold(gray, 15, 255, cv2.THRESH_BINARY)
-                    
-                    # Морфологические операции для улучшения маски
-                    kernel = np.ones((3,3), np.uint8)
-                    thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
-                    thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
-                    
-                    # Поиск контуров
-                    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                    self.debug_print(f"Найдено контуров: {len(contours)}")
-                    
-                    objects_found = 0
-                    small_objects = 0
-                    
-                    for i, contour in enumerate(contours):
-                        area = cv2.contourArea(contour)
-                        
-                        if area < 500:  # Фильтр маленьких областей
-                            small_objects += 1
-                            continue
-                        
-                        # Получаем ограничивающую рамку
-                        x, y, w, h = cv2.boundingRect(contour)
-                        
-                        # Добавляем отступы
-                        padding = 5
-                        x = max(0, x - padding)
-                        y = max(0, y - padding)
-                        w = min(img.shape[1] - x, w + 2 * padding)
-                        h = min(img.shape[0] - y, h + 2 * padding)
-                        
-                        # Вырезаем объект
-                        object_img = img[y:y+h, x:x+w]
-                        
-                        # Сохраняем кадр в frames_dir
-                        frame_filename = frames_dir / f"frame_{self.stats['total_objects']:06d}.png"
-                        success = cv2.imwrite(str(frame_filename), object_img)
-                        
-                        if success:
-                            self.stats['total_objects'] += 1
-                            objects_found += 1
-                        else:
-                            print(f"    ❌ Ошибка сохранения кадра {frame_filename}")
-                    
-                    self.stats['small_objects_skipped'] += small_objects
+                    # Обновляем статистику
+                    self.stats['small_objects_skipped'] += text_small_objects + image_small_objects
                     self.stats['processed_images'] += 1
                     
-                    if objects_found > 0:
-                        print(f"    ✅ Найдено объектов: {objects_found} (пропущено мелких: {small_objects})")
-                    else:
-                        print(f"    ⚠️  Объекты не обнаружены (пропущено мелких: {small_objects})")
+                    total_objects_found = text_objects_found + image_objects_found
+                    chapter_objects += total_objects_found
+                    chapter_text_objects += text_objects_found
+                    chapter_image_objects += image_objects_found
+                    chapter_small_objects += text_small_objects + image_small_objects
                     
-                    chapter_objects += objects_found
-                    
-                    # Прогресс в реальном времени
-                    progress = (self.stats['processed_images'] / total_images) * 100
-                    print(f"    📊 Общий прогресс: {progress:.1f}% ({self.stats['processed_images']}/{total_images})")
-                    
-                except Exception as e:
-                    print(f"    ❌ Ошибка при обработке {image_path}: {str(e)}")
+                except Exception:
                     self.stats['failed_images'] += 1
                     continue
-                
-                print()  # Пустая строка между изображениями
             
-            print(f"✅ Глава {chapter_path.name} завершена: {chapter_objects} объектов")
+            print(f"   📝 Текст: {chapter_text_objects}")
+            print(f"   🖼️  Изобр: {chapter_image_objects}")
+            print(f"   📊 Всего: {chapter_objects}")
             self.stats['processed_chapters'] += 1
-            print("-" * 50)
         
         self.stats['end_time'] = datetime.now()
         
@@ -212,46 +211,42 @@ class FrameExtractor:
         self.print_stats()
     
     def print_stats(self):
-        """Вывод подробной статистики"""
-        print("\n" + "="*60)
-        print("ФИНАЛЬНАЯ СТАТИСТИКА")
-        print("="*60)
+        """Вывод статистики"""
+        print("\n" + "="*40)
+        print("РЕЗУЛЬТАТЫ")
+        print("="*40)
         
         if self.stats['start_time'] and self.stats['end_time']:
             duration = self.stats['end_time'] - self.stats['start_time']
-            print(f"Общее время обработки: {duration}")
+            print(f"Время: {duration}")
         
-        print(f"Всего глав обнаружено: {self.stats['total_chapters']}")
-        print(f"Обработано глав: {self.stats['processed_chapters']}")
-        print(f"Всего изображений: {self.stats['total_images']}")
-        print(f"Успешно обработано: {self.stats['processed_images']}")
-        print(f"Не удалось обработать: {self.stats['failed_images']}")
-        print(f"Обнаружено объектов: {self.stats['total_objects']}")
-        print(f"Пропущено мелких объектов: {self.stats['small_objects_skipped']}")
+        print(f"Глав: {self.stats['processed_chapters']}/{self.stats['total_chapters']}")
+        print(f"Изображений: {self.stats['processed_images']}/{self.stats['total_images']}")
+        print(f"Ошибок: {self.stats['failed_images']}")
+        print(f"Текст: {self.stats['text_objects_found']}")
+        print(f"Изобр: {self.stats['image_objects_found']}")
+        print(f"Всего: {self.stats['total_objects']}")
         
         if self.stats['processed_images'] > 0:
             success_rate = (self.stats['processed_images'] / self.stats['total_images']) * 100
             objects_per_image = self.stats['total_objects'] / self.stats['processed_images'] if self.stats['processed_images'] > 0 else 0
-            print(f"Процент успешной обработки: {success_rate:.1f}%")
-            print(f"Среднее объектов на изображение: {objects_per_image:.1f}")
+            print(f"Успешно: {success_rate:.1f}%")
+            print(f"На изображение: {objects_per_image:.1f}")
         
-        print("="*60)
+        print("="*40)
 
 def main():
-    print("🎬 ИНИЦИАЛИЗАЦИЯ ПРОГРАММЫ")
     extractor = FrameExtractor()
     
     try:
         extractor.process_images()
     except KeyboardInterrupt:
-        print("\n\n⚠️  Обработка прервана пользователем")
+        print("\nПрервано пользователем")
         if extractor.stats['start_time'] and not extractor.stats['end_time']:
             extractor.stats['end_time'] = datetime.now()
         extractor.print_stats()
     except Exception as e:
-        print(f"\n\n❌ КРИТИЧЕСКАЯ ОШИБКА: {str(e)}")
-        import traceback
-        traceback.print_exc()
+        print(f"\nОшибка: {str(e)}")
         if extractor.stats['start_time'] and not extractor.stats['end_time']:
             extractor.stats['end_time'] = datetime.now()
         extractor.print_stats()
