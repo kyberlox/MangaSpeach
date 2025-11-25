@@ -8,3 +8,8 @@ bash start.sh
 docker build -t manga-speach-app .
 docker run -it -v ./:/app --rm manga-speach-app
 ```
+
+## Основной способ запуска
+```
+python main.py
+```
