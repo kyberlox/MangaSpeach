@@ -1,8 +1,10 @@
-from .get_images import download_manga_chapter
-from .get_frames import FrameExtractor
+from .download_manga_chapter import MangaDownloader
+from .frame_extractor import FrameExtractor
+from .gui import MangaSpeechApp
 
 __all__ = [
-    "download_manga_chapter",
-    "FrameExtractor"
+    "MangaDownloader",
+    "FrameExtractor",
+    "MangaSpeechApp"
     ]
 __version__ = "1.0.0"
